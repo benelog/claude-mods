@@ -1,0 +1,16 @@
+{
+  "name": "benelog",
+  "owner": {
+    "name": "Sanghyuk Jung"
+  },
+  "metadata": {
+    "description": "Mods for Claude Code by benelog"
+  },
+  "plugins": [
+    {
+      "name": "hud",
+      "source": "./plugins/hud",
+      "description": "Status line with plan, organization, model, effort, context usage and rate-limit quota"
+    }
+  ]
+}
