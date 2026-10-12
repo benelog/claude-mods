@@ -11,10 +11,12 @@ type Step = {
   prompt: number
 }
 
+// Where the TTL shown came from, weakest first: the plan alone, the GrowthBook flag, the account gone into overage, or a request.
+type TtlSource = 'plan' | 'flag' | 'overage' | 'observed'
+
 type Cache = {
   ttl: Ttl
-  // Whether a request has shown the TTL, rather than the plan suggesting it.
-  isTtlKnown: boolean
+  ttlSource: TtlSource
   last?: Step
   verdict?: string
 }
@@ -38,9 +40,43 @@ function effortFromSettings(settings: Readonly<Record<string, unknown>>, model: 
   return typeof level === 'string' || typeof level === 'number' ? String(level) : undefined
 }
 
+type ClaudeJson = {
+  oauthAccount?: Record<string, unknown>
+  cachedGrowthBookFeatures?: { tengu_prompt_cache_1h_config?: { allowlist?: unknown } }
+}
+
+// Whether the GrowthBook flag Claude Code last fetched gives an interactive session's main thread the one-hour TTL; undefined when the flag is not cached.
+function isMainThreadOnOneHourTtl(config: ClaudeJson): boolean | undefined {
+  const allowlist = config.cachedGrowthBookFeatures?.tengu_prompt_cache_1h_config?.allowlist
+  if (!Array.isArray(allowlist)) return undefined
+  return allowlist.some(pattern => typeof pattern === 'string' && globMatches(pattern, 'repl_main_thread'))
+}
+
+// A pattern whose `*` stands for any run of characters, as the allowlist writes them.
+function globMatches(pattern: string, name: string): boolean {
+  const [head = '', ...rest] = pattern.split('*')
+  if (!rest.length) return pattern === name
+  if (!name.startsWith(head)) return false
+  let from = head.length
+  for (const [i, part] of rest.entries()) {
+    const isLast = i === rest.length - 1
+    const at = isLast ? name.length - part.length : name.indexOf(part, from)
+    if (at < from) return false
+    from = at + part.length
+  }
+  return true
+}
+
+// The TTL a session starts with: what the flag says on a subscription, else what the plan suggests.
+function initialCache(config: ClaudeJson, isSubscription: boolean): Cache {
+  const isOneHour = isMainThreadOnOneHourTtl(config)
+  if (isSubscription && isOneHour !== undefined) return { ttl: isOneHour ? '1h' : '5m', ttlSource: 'flag' }
+  return { ttl: isSubscription ? '1h' : '5m', ttlSource: 'plan' }
+}
+
 // The plan and organization the account signed in with, as ~/.claude.json's oauthAccount records them.
-function accountFromConfig(text: string): { label?: string; isSubscription: boolean } {
-  const account = (JSON.parse(text) as { oauthAccount?: Record<string, unknown> }).oauthAccount
+function accountFromConfig(config: ClaudeJson): { label?: string; isSubscription: boolean } {
+  const account = config.oauthAccount
   if (!account) return { isSubscription: false }
   const type = typeof account.organizationType === 'string' ? account.organizationType : undefined
   const tier = typeof account.organizationRateLimitTier === 'string' ? account.organizationRateLimitTier : ''
@@ -77,19 +113,28 @@ function judgeCache(cache: Cache, step: Step): Cache {
   const isReused = step.read >= 0.5 * (prev.read + prev.written)
   if (isReused) {
     // A prefix read back after more than five minutes idle can only have lived on a one-hour TTL.
-    const learned = gap > TTL_MS['5m'] ? { ttl: '1h' as const, isTtlKnown: true } : {}
+    const learned = gap > TTL_MS['5m'] ? { ttl: '1h' as const, ttlSource: 'observed' as const } : {}
     return { ...cache, ...learned, last: step, verdict: `✓ ${hitPercent}%` }
   }
   if (step.model !== prev.model) return { ...cache, last: step, verdict: '✗ model changed' }
   if (step.prompt < 0.5 * prev.prompt) return { ...cache, last: step, verdict: '✗ compacted' }
   if (gap > TTL_MS[cache.ttl]) return { ...cache, last: step, verdict: '✗ expired' }
   // A miss inside the hour after more than five minutes idle points to a five-minute TTL.
-  if (gap > TTL_MS['5m']) return { ...cache, ttl: '5m', isTtlKnown: true, last: step, verdict: '✗ expired' }
+  if (gap > TTL_MS['5m']) return { ...cache, ttl: '5m', ttlSource: 'observed', last: step, verdict: '✗ expired' }
   return { ...cache, last: step, verdict: '✗ broken' }
 }
 
+// A subscription past a rate-limit window runs on extra usage, where requests drop to the five-minute TTL; back under it, the session's own TTL returns.
+function withOverage(cache: Cache, limits: SessionRateLimit[], isSubscription: boolean, initial: Cache): Cache {
+  if (cache.ttlSource === 'observed') return cache
+  if (isSubscription && limits.some(l => l.percentUsed >= 100)) return { ...cache, ttl: '5m', ttlSource: 'overage' }
+  return cache.ttlSource === 'overage' ? { ...cache, ttl: initial.ttl, ttlSource: initial.ttlSource } : cache
+}
+
+const TTL_MARKS: Record<TtlSource, string> = { plan: '?', flag: '', overage: ' (overage)', observed: '' }
+
 function statusText(s: Shown): string | undefined {
-  const ttl = `ttl ${s.cache.ttl}${s.cache.isTtlKnown ? '' : '?'}`
+  const ttl = `ttl ${s.cache.ttl}${TTL_MARKS[s.cache.ttlSource]}`
   const parts = [
     s.account,
     s.model ? `${s.model}${s.effort ? ` (${s.effort})` : ''}` : undefined,
@@ -101,8 +146,10 @@ function statusText(s: Shown): string | undefined {
 }
 
 export const register: Register = on => {
-  const shown: Shown = { limits: [], cache: { ttl: '5m', isTtlKnown: false } }
+  const shown: Shown = { limits: [], cache: { ttl: '5m', ttlSource: 'plan' } }
   let expiry: { cancel: () => void } | undefined
+  let isSubscription = false
+  let initial: Cache = shown.cache
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -110,16 +157,19 @@ export const register: Register = on => {
     shown.model = await $.session.model()
     shown.effort ??= effortFromSettings(await $.settings.read(), shown.model)
     const configDir = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? (await $.env.get('HOME'))
-    const account = await $.fs
+    const config = await $.fs
       .read(`${configDir}/.claude.json`)
-      .then(accountFromConfig)
-      .catch(() => ({ label: undefined, isSubscription: false }))
+      .then(text => JSON.parse(text) as ClaudeJson)
+      .catch((): ClaudeJson => ({}))
+    const account = accountFromConfig(config)
     shown.account = account.label
-    // A new conversation starts a new prefix; until a request shows the TTL, the plan suggests it.
+    isSubscription = account.isSubscription
+    // A new conversation starts a new prefix; until a request shows the TTL, the flag or the plan says it.
     expiry?.cancel()
-    shown.cache = { ttl: account.isSubscription ? '1h' : '5m', isTtlKnown: false }
     shown.contextPercent = usage.context.percent
     shown.limits = usage.rateLimits
+    initial = initialCache(config, isSubscription)
+    shown.cache = withOverage(initial, shown.limits, isSubscription, initial)
     $.ui.status(statusText(shown))
     return started
   })
@@ -148,6 +198,7 @@ export const register: Register = on => {
   on('session.measure', ($, e, next) => {
     shown.contextPercent = e.context.percent
     shown.limits = e.rateLimits
+    shown.cache = withOverage(shown.cache, shown.limits, isSubscription, initial)
     $.ui.status(statusText(shown))
     return next(e)
   })

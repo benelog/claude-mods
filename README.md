@@ -36,8 +36,12 @@ Max 20x · personal (admin) │ claude-opus-5-5 (high) │ ctx 42% │ cache ✓
   `✓ 96%` is the share of the prompt read from the cache.
   `✗` marks a request that did not reuse the prefix the one before it cached, with the cause: `model changed`, `compacted`, `expired` (idle past the TTL) or `broken` (anything else, such as a changed system prompt or tool list).
   `⌛ expired` appears once the session has been idle past the TTL, before the next request pays for it.
-- The engine does not report the cache TTL, so the mod infers it.
-  It starts from the plan (`1h` on a subscription, `5m` otherwise) with a `?`, and drops the `?` once a request shows it: a hit after more than five idle minutes means `1h`, a miss inside the hour after more than five idle minutes means `5m`.
+- The engine does not report the cache TTL, so the mod works it out, from the strongest evidence it has:
+  - A request: a hit after more than five idle minutes means `1h`, and a miss inside the hour after more than five idle minutes means `5m`.
+  - Overage: on a subscription past a rate-limit window, requests drop to `5m`, shown as `5m (overage)`, until the window resets.
+  - The GrowthBook flag `tengu_prompt_cache_1h_config` that Claude Code caches in `~/.claude.json` under `cachedGrowthBookFeatures`: its `allowlist` gives the one-hour TTL to the request sources it names, and `repl_main_thread*` covers an interactive session's main thread.
+    The flag is internal to Claude Code and undocumented, so its name or shape may change; the mod then falls back to the plan.
+  - The plan alone: `1h` on a subscription and `5m` otherwise, marked `?`.
 
 ## Development
 
