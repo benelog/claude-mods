@@ -1,6 +1,6 @@
 {
   "name": "hud",
-  "version": "0.1.0",
-  "description": "Status line with plan, organization, model, effort, context usage and rate-limit quota",
+  "version": "0.2.0",
+  "description": "Status line with plan, organization, model, effort, context usage, prompt-cache state and rate-limit quota",
   "author": { "name": "Sanghyuk Jung" }
 }

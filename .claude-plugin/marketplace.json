@@ -10,7 +10,7 @@
     {
       "name": "hud",
       "source": "./plugins/hud",
-      "description": "Status line with plan, organization, model, effort, context usage and rate-limit quota"
+      "description": "Status line with plan, organization, model, effort, context usage, prompt-cache state and rate-limit quota"
     }
   ]
 }
