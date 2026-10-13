@@ -50,7 +50,7 @@ async function startSession(
   on: On,
   allowlist?: string[],
 ): Promise<void> {
-  on('session.start', () => ({ cwd: '/' }))
+  on('session.start', () => ({ cwd: '/work/proj' }))
   on('session.model', () => ({ value: 'claude-opus-5-5' }) as never)
   on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200000 }, rateLimits: [] } }) as never)
   on('settings.read', () => ({
@@ -58,6 +58,7 @@ async function startSession(
   }) as never)
   on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/home/someone' : undefined }) as never)
   on('fs.read', (_, e) => {
+    if (e.path === '/work/proj/.git/HEAD') return { value: 'ref: refs/heads/main\n' } as never
     expect(e.path).toBe('/home/someone/.claude.json')
     return {
       value: JSON.stringify({
@@ -71,28 +72,28 @@ async function startSession(
       }),
     } as never
   })
-  await $.session.start({ source: 'startup', cwd: '/' } as never)
+  await $.session.start({ source: 'startup', cwd: '/work/proj' } as never)
 }
 
 test('shows the plan, the model and its effort from settings when the session starts', async ($, on) => {
   const shown = recordStatus(on)
   await startSession($, on)
 
-  expect(shown.at(-1)).toBe('Max 20x · personal (admin) │ claude-opus-5-5 (high) │ cache ttl 1h?')
+  expect(shown.at(-1)).toBe('Max 20x · personal │ proj (main) │ claude-opus-5-5 (high) │ cache ttl 1h?')
 })
 
 test('takes the TTL from the GrowthBook flag when it is cached', async ($, on) => {
   const shown = recordStatus(on)
   await startSession($, on, ['repl_main_thread*', 'sdk'])
 
-  expect(shown.at(-1)).toBe('Max 20x · personal (admin) │ claude-opus-5-5 (high) │ cache ttl 1h')
+  expect(shown.at(-1)).toBe('Max 20x · personal │ proj (main) │ claude-opus-5-5 (high) │ cache ttl 1h')
 })
 
 test('takes a five-minute TTL when the flag leaves the main thread out', async ($, on) => {
   const shown = recordStatus(on)
   await startSession($, on, ['sdk'])
 
-  expect(shown.at(-1)).toBe('Max 20x · personal (admin) │ claude-opus-5-5 (high) │ cache ttl 5m')
+  expect(shown.at(-1)).toBe('Max 20x · personal │ proj (main) │ claude-opus-5-5 (high) │ cache ttl 5m')
 })
 
 test('drops to a five-minute TTL in overage and returns when the window resets', async ($, on) => {
@@ -101,10 +102,10 @@ test('drops to a five-minute TTL in overage and returns when the window resets',
   await startSession($, on, ['repl_main_thread*'])
 
   await $.session.measure({ context: { window: 200000 }, rateLimits: [{ kind: 'five_hour', percentUsed: 100 }], changed: ['rateLimits'] })
-  expect(shown.at(-1)).toBe('Max 20x · personal (admin) │ claude-opus-5-5 (high) │ cache ttl 5m (overage) │ 5h 100%')
+  expect(shown.at(-1)).toBe('Max 20x · personal │ proj (main) │ claude-opus-5-5 (high) │ cache ttl 5m (overage) │ 5h 100%')
 
   await $.session.measure({ context: { window: 200000 }, rateLimits: [{ kind: 'five_hour', percentUsed: 0 }], changed: ['rateLimits'] })
-  expect(shown.at(-1)).toBe('Max 20x · personal (admin) │ claude-opus-5-5 (high) │ cache ttl 1h │ 5h 0%')
+  expect(shown.at(-1)).toBe('Max 20x · personal │ proj (main) │ claude-opus-5-5 (high) │ cache ttl 1h │ 5h 0%')
 })
 
 test('learns a one-hour TTL from a hit after ten idle minutes, and marks the prefix expired an hour later', async ($, on) => {

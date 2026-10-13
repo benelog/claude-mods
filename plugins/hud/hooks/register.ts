@@ -23,6 +23,7 @@ type Cache = {
 
 type Shown = {
   account?: string
+  location?: string
   model?: string
   effort?: string
   contextPercent?: number
@@ -85,14 +86,34 @@ function accountFromConfig(config: ClaudeJson): { label?: string; isSubscription
   const name = typeof account.organizationName === 'string' ? account.organizationName : undefined
   // A personal plan's organization is the one created with the account, named after its email.
   const org = name?.endsWith("'s Organization") ? 'personal' : name
-  const role = typeof account.organizationRole === 'string' ? account.organizationRole : undefined
   const parts = [
     plan ? `${plan}${multiplier ? ` ${multiplier}` : ''}` : undefined,
-    org ? `${org}${role ? ` (${role})` : ''}` : undefined,
+    org,
   ].filter(Boolean)
   return {
     label: parts.length ? parts.join(' · ') : undefined,
     isSubscription: /^claude_(pro|max|team|enterprise)$/.test(type ?? ''),
+  }
+}
+
+// The current branch, or the short commit when HEAD is detached, found by walking up from cwd to the nearest .git; undefined outside a repository.
+async function branchOf(cwd: string, read: (path: string) => Promise<string>): Promise<string | undefined> {
+  for (let dir = cwd; ; dir = dir.slice(0, dir.lastIndexOf('/')) || '/') {
+    let gitDir = `${dir === '/' ? '' : dir}/.git`
+    let head = await read(`${gitDir}/HEAD`).catch(() => undefined)
+    if (head === undefined) {
+      // A worktree or submodule keeps a .git file that points at the real directory.
+      const pointer = /^gitdir: (.+)$/m.exec(await read(gitDir).catch(() => ''))?.[1]
+      if (pointer) {
+        gitDir = pointer.startsWith('/') ? pointer : `${dir}/${pointer}`
+        head = await read(`${gitDir}/HEAD`).catch(() => undefined)
+      }
+    }
+    if (head !== undefined) {
+      const ref = /^ref: refs\/heads\/(.+)$/m.exec(head)?.[1]
+      return ref ?? head.trim().slice(0, 7)
+    }
+    if (dir === '/') return undefined
   }
 }
 
@@ -137,6 +158,7 @@ function statusText(s: Shown): string | undefined {
   const ttl = `ttl ${s.cache.ttl}${TTL_MARKS[s.cache.ttlSource]}`
   const parts = [
     s.account,
+    s.location,
     s.model ? `${s.model}${s.effort ? ` (${s.effort})` : ''}` : undefined,
     s.contextPercent === undefined ? undefined : `ctx ${s.contextPercent}%`,
     s.cache.verdict ? `cache ${s.cache.verdict} · ${ttl}` : `cache ${ttl}`,
@@ -163,6 +185,10 @@ export const register: Register = on => {
       .catch((): ClaudeJson => ({}))
     const account = accountFromConfig(config)
     shown.account = account.label
+    const cwd = e.cwd
+    const branch = await branchOf(cwd, path => $.fs.read(path))
+    const dirName = cwd.slice(cwd.lastIndexOf('/') + 1) || '/'
+    shown.location = branch ? `${dirName} (${branch})` : dirName
     isSubscription = account.isSubscription
     // A new conversation starts a new prefix; until a request shows the TTL, the flag or the plan says it.
     expiry?.cancel()
