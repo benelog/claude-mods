@@ -1,4 +1,4 @@
-import type { Register, SessionRateLimit, TurnUsage } from 'claude-code'
+import type { Color, Register, SessionRateLimit, TurnUsage } from 'claude-code'
 
 type Ttl = '5m' | '1h'
 
@@ -21,9 +21,12 @@ type Cache = {
   verdict?: string
 }
 
+// The working directory's name, with its branch inside a git repository.
+type Location = { dir: string; branch?: string }
+
 type Shown = {
   account?: string
-  location?: string
+  location?: Location
   model?: string
   effort?: string
   contextPercent?: number
@@ -117,11 +120,9 @@ async function branchOf(cwd: string, read: (path: string) => Promise<string>): P
   }
 }
 
-// The working directory's name, with its branch inside a git repository.
-async function locationOf($: { fs: { read: (path: string) => Promise<string> } }, cwd: string): Promise<string> {
+async function locationOf($: { fs: { read: (path: string) => Promise<string> } }, cwd: string): Promise<Location> {
   const branch = await branchOf(cwd, path => $.fs.read(path))
-  const dirName = cwd.slice(cwd.lastIndexOf('/') + 1) || '/'
-  return branch ? `${dirName} (${branch})` : dirName
+  return { dir: cwd.slice(cwd.lastIndexOf('/') + 1) || '/', branch }
 }
 
 function stepOf(usage: TurnUsage, at: number): Step {
@@ -159,20 +160,45 @@ function withOverage(cache: Cache, limits: SessionRateLimit[], isSubscription: b
   return cache.ttlSource === 'overage' ? { ...cache, ttl: initial.ttl, ttlSource: initial.ttlSource } : cache
 }
 
-const TTL_MARKS: Record<TtlSource, string> = { plan: '?', flag: '', overage: ' (overage)', observed: '' }
+// A run of text in one color; the colors are theme keys, so the line follows the person's theme.
+type Piece = [text: string, color: Color]
 
-function statusText(s: Shown): string | undefined {
-  const ttl = `ttl ${s.cache.ttl}${TTL_MARKS[s.cache.ttlSource]}`
-  const parts = [
-    s.account,
-    s.location,
-    s.model ? `${s.model}${s.effort ? ` (${s.effort})` : ''}` : undefined,
-    s.contextPercent === undefined ? undefined : `ctx ${s.contextPercent}%`,
-    s.cache.verdict ? `cache ${s.cache.verdict} · ${ttl}` : `cache ${ttl}`,
-    s.limits.length ? s.limits.map(l => `${LIMIT_LABELS[l.kind] ?? l.kind} ${l.percentUsed}%`).join(' · ') : undefined,
-  ].filter(Boolean)
-  return parts.length ? parts.join(' │ ') : undefined
+const DIM = 'inactive'
+const DOT: Piece = [' · ', DIM]
+const BAR: Piece = [' │ ', DIM]
+
+// How full a context or quota window is: plenty left, getting close, at the limit.
+const usageColor = (percent: number): Color => (percent >= 80 ? 'error' : percent >= 50 ? 'warning' : 'success')
+
+const VERDICT_COLORS: Record<string, Color> = { '✓': 'success', '✗': 'error', '⌛': 'warning' }
+
+const TTL_MARKS: Record<TtlSource, Piece[]> = { plan: [['?', DIM]], flag: [], overage: [[' (overage)', 'warning']], observed: [] }
+
+function entries(s: Shown): Piece[][] {
+  const { cache, location } = s
+  const all: Piece[][] = [
+    s.account ? [[s.account, 'merged']] : [],
+    location ? [[location.dir, 'ide'], ...(location.branch ? ([[' (', DIM], [location.branch, 'bashBorder'], [')', DIM]] as Piece[]) : [])] : [],
+    s.model ? [[s.model, 'claude'], ...(s.effort ? ([[` (${s.effort})`, DIM]] as Piece[]) : [])] : [],
+    s.contextPercent === undefined ? [] : [['ctx ', DIM], [`${s.contextPercent}%`, usageColor(s.contextPercent)]],
+    [
+      ['cache ', DIM],
+      ...(cache.verdict ? ([[cache.verdict, VERDICT_COLORS[cache.verdict.slice(0, 1)] ?? DIM], DOT] as Piece[]) : []),
+      ['ttl ', DIM],
+      [cache.ttl, 'text'],
+      ...TTL_MARKS[cache.ttlSource],
+    ],
+    s.limits.flatMap((l, i): Piece[] => [
+      ...(i ? [DOT] : []),
+      [`${LIMIT_LABELS[l.kind] ?? l.kind} `, DIM],
+      [`${l.percentUsed}%`, usageColor(l.percentUsed)],
+    ]),
+  ]
+  return all.filter(entry => entry.length)
 }
+
+// The entries one after another, a bar between each two.
+const hudLine = (s: Shown): Piece[] => entries(s).flatMap((entry, i) => (i ? [BAR, ...entry] : entry))
 
 export const register: Register = on => {
   const shown: Shown = { limits: [], cache: { ttl: '5m', ttlSource: 'plan' } }
@@ -202,7 +228,7 @@ export const register: Register = on => {
     shown.limits = usage.rateLimits
     initial = initialCache(config, isSubscription)
     shown.cache = withOverage(initial, shown.limits, isSubscription, initial)
-    $.ui.status(statusText(shown))
+    $.ui.invalidate('ui.render')
     return started
   })
 
@@ -213,20 +239,35 @@ export const register: Register = on => {
       if (cwd !== undefined) shown.location = await locationOf($, cwd)
       shown.model = e.model
       shown.effort = e.effort === undefined ? undefined : String(e.effort)
-      $.ui.status(statusText(shown))
+      $.ui.invalidate('ui.render')
     }
     const response = yield* next(e)
     if (isMain && response.usage) {
       shown.cache = judgeCache(shown.cache, stepOf(response.usage, await $.clock.now()))
-      $.ui.status(statusText(shown))
+      $.ui.invalidate('ui.render')
       // Left idle past the TTL, the next request writes the whole prefix again.
       expiry?.cancel()
       expiry = $.clock.after(TTL_MS[shown.cache.ttl], () => {
         shown.cache = { ...shown.cache, verdict: '⌛ expired' }
-        $.ui.status(statusText(shown))
+        $.ui.invalidate('ui.render')
       })
     }
     return response
+  })
+
+  // The band above the prompt draws the line; a survey there takes its place until answered.
+  on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
+    if (e.props.hasSurvey) return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    return (
+      <Box key="hud">
+        <Text wrap="truncate-end">
+          {hudLine(shown).map(([text, color]) => (
+            <Text color={color}>{text}</Text>
+          ))}
+        </Text>
+      </Box>
+    )
   })
 
   on('session.measure', async ($, e, next) => {
@@ -234,7 +275,7 @@ export const register: Register = on => {
     shown.contextPercent = e.context.percent
     shown.limits = e.rateLimits
     shown.cache = withOverage(shown.cache, shown.limits, isSubscription, initial)
-    $.ui.status(statusText(shown))
+    $.ui.invalidate('ui.render')
     return next(e)
   })
 }

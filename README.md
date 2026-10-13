@@ -7,7 +7,7 @@ Each mod is a plugin under `plugins/`, installed on its own.
 
 | Mod | What it does |
 | --- | --- |
-| [hud](plugins/hud) | Shows the plan, organization, model, effort, context usage, prompt-cache state and rate-limit quota on the status line. |
+| [hud](plugins/hud) | Shows the plan, organization, model, effort, context usage, prompt-cache state and rate-limit quota in a colored line above the prompt. |
 
 ## Install
 
@@ -21,11 +21,15 @@ Answer `y` to add the marketplace, then pick the user scope so the mod loads in 
 
 ## hud
 
-The status line reads like this:
+The line above the prompt reads like this:
 
 ```
 Max 20x · personal │ claude-mods (main) │ claude-opus-5-5 (high) │ ctx 42% │ cache ✓ 96% · ttl 1h │ 5h 23.5% · 7d 7%
 ```
+
+Each entry has a color of its own, taken from the theme's keys so it follows `/theme`: the plan in purple, the directory in blue and its branch in pink, the model in Claude's orange, and labels and separators in gray.
+Usage is green under 50%, yellow under 80% and red from there; a cache hit is green, a miss red, and an idle expiry yellow.
+The status line under the prompt draws its text as given, without colors, so the mod draws in the band above the prompt instead; a survey takes the band while it is open, and `ctrl+x ctrl+a` or the `[-]` folds it.
 
 - The plan and organization come from `oauthAccount` in `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`), read once when the session starts.
   A personal plan's organization, named after the account's email, shows as `personal`.
