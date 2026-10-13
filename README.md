@@ -29,7 +29,7 @@ Max 20x · personal │ claude-mods (main) │ claude-opus-5-5 (high) │ ctx 42
 
 - The plan and organization come from `oauthAccount` in `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`), read once when the session starts.
   A personal plan's organization, named after the account's email, shows as `personal`.
-- The working directory and, inside a git repository, its current branch come from the session's `cwd` and `.git/HEAD`, read once when the session starts.
+- The working directory and, inside a git repository, its current branch come from the session's `cwd` and `.git/HEAD`, read again before each model request and measurement.
 - The model and effort start from `/model` and the `effortLevel` settings (`modelSettings.<model>.effortLevel` first), then follow each model request.
 - Context usage and the 5-hour and 7-day quota windows come from the engine's measurements after each turn; no extra API call is made.
   The quota windows appear only on a subscription.
