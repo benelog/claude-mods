@@ -117,6 +117,13 @@ async function branchOf(cwd: string, read: (path: string) => Promise<string>): P
   }
 }
 
+// The working directory's name, with its branch inside a git repository.
+async function locationOf($: { fs: { read: (path: string) => Promise<string> } }, cwd: string): Promise<string> {
+  const branch = await branchOf(cwd, path => $.fs.read(path))
+  const dirName = cwd.slice(cwd.lastIndexOf('/') + 1) || '/'
+  return branch ? `${dirName} (${branch})` : dirName
+}
+
 function stepOf(usage: TurnUsage, at: number): Step {
   const read = usage.cache_read_input_tokens
   const written = usage.cache_creation_input_tokens
@@ -174,14 +181,6 @@ export const register: Register = on => {
   let initial: Cache = shown.cache
   let cwd: string | undefined
 
-  // The branch can change mid-session, so it is read again before each model request and each measurement.
-  async function refreshLocation($: { fs: { read: (path: string) => Promise<string> } }): Promise<void> {
-    if (cwd === undefined) return
-    const branch = await branchOf(cwd, path => $.fs.read(path))
-    const dirName = cwd.slice(cwd.lastIndexOf('/') + 1) || '/'
-    shown.location = branch ? `${dirName} (${branch})` : dirName
-  }
-
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     const usage = await $.session.usage()
@@ -195,7 +194,7 @@ export const register: Register = on => {
     const account = accountFromConfig(config)
     shown.account = account.label
     cwd = e.cwd
-    await refreshLocation($)
+    shown.location = await locationOf($, cwd)
     isSubscription = account.isSubscription
     // A new conversation starts a new prefix; until a request shows the TTL, the flag or the plan says it.
     expiry?.cancel()
@@ -210,7 +209,8 @@ export const register: Register = on => {
   on('turn.step', async function* ($, e, next) {
     const isMain = e.agentId === undefined
     if (isMain) {
-      await refreshLocation($)
+      // The branch can change mid-session, so it is read again before each model request and each measurement.
+      if (cwd !== undefined) shown.location = await locationOf($, cwd)
       shown.model = e.model
       shown.effort = e.effort === undefined ? undefined : String(e.effort)
       $.ui.status(statusText(shown))
@@ -230,7 +230,7 @@ export const register: Register = on => {
   })
 
   on('session.measure', async ($, e, next) => {
-    await refreshLocation($)
+    if (cwd !== undefined) shown.location = await locationOf($, cwd)
     shown.contextPercent = e.context.percent
     shown.limits = e.rateLimits
     shown.cache = withOverage(shown.cache, shown.limits, isSubscription, initial)
